@@ -47,9 +47,24 @@ The following is a non-exhaustive list of points to consider:
 
 ## Prerequisites
 
+:::{important}
+This list shows basic examples of how to create the necessary resources to get you
+rolling quickly. It does not necessarily represent recommended practices, specifically
+regarding token/SecretID validity.
+:::
+
 :::{tab} Token
 1. A Vault server (cluster).
-2. Authentication credentials for the Salt master.
+2. A [Token Role](token-role-target). This is not strictly required, but if
+   omitted, issued minion tokens will be bound to the Salt master's token
+   validity and be able to inherit all its policies.
+
+   ```bash
+   vault write auth/token/roles/salt-master \
+     orphan=true \
+     allowed_policies=salt_minion \
+     allowed_policies_glob='salt_minion_*,salt_role_*'
+   ```
 3. A policy allowing the Salt master access to token issuance endpoints:
    ```vaultpolicy
    # This is the required Salt master policy for issuing Tokens.
@@ -60,21 +75,38 @@ The following is a non-exhaustive list of points to consider:
    }
 
    # Issue tokens with Token Roles
-   # You can substitute the glob with the role name the master is configured with
-   path "auth/token/create/*" {
+   # Substitute `salt-master` with the role name the master is configured with
+   path "auth/token/create/salt-master" {
      capabilities = ["create", "read", "update"]
    }
    ```
-4. A [Token Role](token-role-target) and policies as needed. This is not strictly required, but if
-   omitted, issued minion tokens will be bound to the Salt master one's and be able
-   to inherit all its policies.
+   You can write it to a file (e.g. `salt-master.hcl`) and create the policy like this:
+   ```bash
+   vault policy write salt-master salt-master.hcl
+   ```
+4. Authentication credentials for the Salt master:
+   ```bash
+   vault auth enable -path=approle approle
+   vault write auth/approle/role/salt-master \
+     token_policies=salt-master
+   # Show RoleID
+   vault read auth/approle/role/salt-master/role-id
+   # Generate new SecretID
+   vault write -f auth/approle/role/salt-master/secret-id
+   ```
+5. Policies for minions as needed.
 :::
 
 :::{tab} AppRole
 1. A Vault server (cluster).
-2. A separate (unused) mount of the AppRole auth backend, called `salt-minions` by default.
-3. Authentication credentials for the Salt master.
-4. A policy allowing the Salt master access to AppRole issuance endpoints:
+2. A separate (unused) mount of the AppRole auth backend, called `salt-minions` by default:
+   ```bash
+   vault auth enable -path=salt-minions approle
+   # You will need the mount accessor to replace the placeholder
+   # the policy below, so look it up now:
+   vault read -format json sys/auth/salt_minions | jq '.data.accessor'
+   ```
+3. A policy allowing the Salt master access to AppRole issuance endpoints:
 
    ```vaultpolicy
    # This is the required Salt master policy for issuing AppRoles.
@@ -89,6 +121,7 @@ The following is a non-exhaustive list of points to consider:
 
    # Manage AppRoles
    # This enables the Salt Master to create roles with arbitrary policies.
+   # If you need to restrict the assignable policies, issue tokens instead.
    path "auth/salt-minions/role/*" {
      capabilities = ["read", "create", "update", "delete"]
    }
@@ -103,6 +136,7 @@ The following is a non-exhaustive list of points to consider:
      capabilities = ["create", "update"]
      allowed_parameters = {
        "alias_name" = []
+       # Replace `auth_approle_0a1b2c3d` with the output of the previous step
        "alias_mount_accessor" = ["auth_approle_0a1b2c3d"]
      }
    }
@@ -122,10 +156,21 @@ The following is a non-exhaustive list of points to consider:
      allowed_parameters = {
        "id" = []
        "canonical_id" = []
+       # Replace `auth_approle_0a1b2c3d` with the output of the previous step
        "mount_accessor" = ["auth_approle_0a1b2c3d"]
        "name" = []
      }
    }
+   ```
+4. Authentication credentials for the Salt master.
+   ```bash
+   vault auth enable -path=approle approle
+   vault write auth/approle/role/salt-master \
+     token_policies=salt-master
+   # Show RoleID
+   vault read -format json auth/approle/role/salt-master/role-id
+   # Generate new SecretID
+   vault write -f auth/approle/role/salt-master/secret-id
    ```
 5. Policies for minions as needed.
 :::
@@ -159,16 +204,6 @@ All parameters for this extension should be put under the `vault` key inside the
 configuration, e.g. in `/etc/salt/master.d/vault.conf`.
 
 #### Master authentication
-:::{tab} Token auth
-```yaml
-vault:
-  auth:
-    token: <your-auth-token>
-  server:
-    url: https://vault.example.org:8200
-```
-:::
-
 :::{tab} AppRole auth
 ```yaml
 vault:
@@ -176,6 +211,16 @@ vault:
     method: approle
     role_id: <your-salt-master-role-id>
     secret_id: <your-salt-master-secret-id>
+  server:
+    url: https://vault.example.org:8200
+```
+:::
+
+:::{tab} Token auth
+```yaml
+vault:
+  auth:
+    token: <your-auth-token>
   server:
     url: https://vault.example.org:8200
 ```
@@ -272,6 +317,10 @@ vault:
       - salt_minion
       - salt_minion_{minion}
       - salt_role_{pillar[roles]}
+      # While it's possible to use {grains[roles]} here
+      # for backwards-compatibility reasons, it's HIGHLY discouraged.
+      # The minion reports grains itself, so a compromised minion would
+      # be able to assign arbitrary roles to itself.
 ```
 
 :::{note}
